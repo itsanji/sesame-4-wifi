@@ -2,3 +2,6 @@ env
 
 node_modules
 sesame_typescript
+.env
+__pycache__/
+venv/

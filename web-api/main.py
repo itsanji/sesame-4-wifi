@@ -11,6 +11,8 @@ from typing import Dict, Any, Optional, Union
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
+load_dotenv()
 
 # Import SESAME library modules
 import sys
@@ -385,7 +387,7 @@ async def health_check():
     return {"status": "healthy", "message": "SESAME Web API is running"}
 
 
-@app.post("/toggle")
+@app.get("/toggle")
 async def toggle_lock() -> ToggleResponse:
     """
     Toggle the SESAME lock state.
@@ -401,7 +403,7 @@ async def toggle_lock() -> ToggleResponse:
         raise HTTPException(status_code=500, detail=result["message"])
 
 
-@app.post("/lock")
+@app.get("/lock")
 async def lock_device() -> ToggleResponse:
     """Lock the SESAME device."""
     logger.info("Lock endpoint called")
@@ -414,7 +416,7 @@ async def lock_device() -> ToggleResponse:
         raise HTTPException(status_code=500, detail=result["message"])
 
 
-@app.post("/unlock")
+@app.get("/unlock")
 async def unlock_device() -> ToggleResponse:
     """Unlock the SESAME device."""
     logger.info("Unlock endpoint called")
@@ -427,7 +429,7 @@ async def unlock_device() -> ToggleResponse:
         raise HTTPException(status_code=500, detail=result["message"])
 
 
-@app.post("/click")
+@app.get("/click")
 async def click_bot() -> ToggleResponse:
     """Click the SESAME Bot."""
     logger.info("Click endpoint called")
@@ -489,7 +491,7 @@ async def get_device_status() -> StatusResponse:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@app.post("/connect")
+@app.get("/connect")
 async def establish_connection() -> ConnectionResponse:
     """
     Manually establish a connection to the SESAME device.
@@ -519,7 +521,7 @@ async def establish_connection() -> ConnectionResponse:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 
-@app.post("/disconnect")
+@app.get("/disconnect")
 async def disconnect_device() -> ConnectionResponse:
     """
     Manually disconnect from the SESAME device.

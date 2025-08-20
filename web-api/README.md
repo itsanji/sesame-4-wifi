@@ -30,9 +30,15 @@ A FastAPI-based web server that provides REST endpoints to control SESAME smart 
     ```
 
 3. **Get Device Credentials**:
+
     - Scan your SESAME device QR code using: [SESAME QR Reader](https://sesame-qr-reader.vercel.app/)
     - Extract the BLE UUID, Secret Key, and Public Key
     - Set these in your `.env` file
+
+4. **Environment Variables**:
+    - The application automatically loads variables from `.env` file
+    - No need to manually source or export environment variables
+    - Variables are loaded when the application starts
 
 ## Configuration
 
@@ -55,11 +61,68 @@ Set the following environment variables:
 
 ### Start the Server
 
+#### Method 1: Direct execution
+
 ```bash
 python main.py
 ```
 
+#### Method 2: Using the run script
+
+```bash
+python run.py
+```
+
+#### Method 3: Using uvicorn directly
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+#### Method 4: Using the service manager script (Bash)
+
+```bash
+# Start the service in background
+./sesame_webapp.sh start
+
+# Check status
+./sesame_webapp.sh status
+
+# View logs
+./sesame_webapp.sh logs
+
+# Stop the service
+./sesame_webapp.sh stop
+
+# Restart the service
+./sesame_webapp.sh restart
+```
+
+#### Method 5: Using Python daemon (Recommended)
+
+```bash
+# Start the service in background
+python daemon.py start
+
+# Check status
+python daemon.py status
+
+# View recent logs
+python daemon.py logs
+
+# Follow logs (live)
+python daemon.py follow
+
+# Stop the service
+python daemon.py stop
+
+# Restart the service
+python daemon.py restart
+```
+
 The server will start on `http://localhost:8000`
+
+**Note**: Environment variables are automatically loaded from the `.env` file - no manual sourcing required!
 
 ### API Documentation
 
@@ -170,11 +233,13 @@ The API now uses connection pooling to maintain persistent connections to your S
 
 ```
 web-api/
-├── main.py              # Main FastAPI application
-├── config.py            # Configuration management
-├── requirements.txt     # Python dependencies
-├── env.example         # Environment variables template
-└── README.md           # This file
+├── main.py                    # Main FastAPI application
+├── config.py                  # Configuration management
+├── requirements.txt           # Python dependencies
+├── env.example               # Environment variables template
+├── sesame_webapp.sh          # Bash service management script
+├── daemon.py                 # Python daemon script (recommended)
+└── README.md                 # This file
 ```
 
 ### Running in Development Mode
