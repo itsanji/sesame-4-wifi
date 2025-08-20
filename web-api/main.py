@@ -195,7 +195,7 @@ async def health_check():
     return {"status": "healthy", "message": "SESAME Web API is running"}
 
 
-@app.post("/toggle")
+@app.get("/toggle")
 async def toggle_lock() -> ToggleResponse:
     """
     Toggle the SESAME lock state.
