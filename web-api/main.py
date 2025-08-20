@@ -73,6 +73,7 @@ class ConnectionResponse(BaseModel):
     device_id: str = None
     product_model: str = None
     connection_established: bool = False
+    connection_working: bool = False
     connection_time: str = None
 
 
@@ -92,6 +93,37 @@ class SesameConnectionManager:
         # Check if connection has expired
         if time.time() - self.connection_time > CONNECTION_TIMEOUT:
             logger.info("Connection has expired, will reconnect")
+            return False
+        
+        return True
+    
+    async def test_connection(self) -> bool:
+        """Test if the current connection is actually working by trying to get device status."""
+        if not self.device or not self.is_connected:
+            return False
+        
+        try:
+            # Try to get device status - this will fail if connection is broken
+            device_status = self.device.getDeviceStatus()
+            logger.debug(f"Connection test successful, device status: {device_status}")
+            return True
+        except Exception as e:
+            logger.warning(f"Connection test failed: {str(e)}")
+            return False
+    
+    async def is_connection_valid(self) -> bool:
+        """Check if the current connection is still valid and actually working."""
+        if not self.is_connected or not self.connection_time:
+            return False
+        
+        # Check if connection has expired
+        if time.time() - self.connection_time > CONNECTION_TIMEOUT:
+            logger.info("Connection has expired, will reconnect")
+            return False
+        
+        # Test if connection is actually working
+        if not await self.test_connection():
+            logger.info("Connection test failed, will reconnect")
             return False
         
         return True
@@ -130,17 +162,21 @@ class SesameConnectionManager:
         logger.info(f"Device found: {device.getDeviceUUID()}, Model: {device.productModel}")
         return device
     
-    async def ensure_connection(self, max_attempts: int = MAX_RECONNECT_ATTEMPTS) -> bool:
-        """Ensure device is connected, reconnect if necessary."""
+    async def ensure_connection(self, max_attempts: int = MAX_RECONNECT_ATTEMPTS) -> tuple[bool, bool]:
+        """Ensure device is connected, reconnect if necessary.
+        
+        Returns:
+            tuple: (success: bool, connection_reused: bool)
+        """
         async with self.connection_lock:
             attempts = 0
             
             while attempts < max_attempts:
                 try:
                     # Check if we have a valid connection
-                    if self.is_connection_valid():
+                    if await self.is_connection_valid():
                         logger.info("Using existing connection")
-                        return True
+                        return True, True  # success, reused
                     
                     # Get or create device
                     device = await self.get_or_create_device()
@@ -157,7 +193,7 @@ class SesameConnectionManager:
                     self.connection_time = time.time()
                     
                     logger.info("Device connected and authenticated successfully")
-                    return True
+                    return True, False  # success, not reused
                     
                 except Exception as e:
                     attempts += 1
@@ -172,9 +208,9 @@ class SesameConnectionManager:
                         await asyncio.sleep(2)
                     else:
                         logger.error(f"Failed to connect after {max_attempts} attempts")
-                        return False
+                        return False, False  # failed, not reused
             
-            return False
+            return False, False
     
     async def disconnect(self):
         """Disconnect the current device."""
@@ -228,15 +264,16 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
     reconnect_attempts = 0
     
     try:
-        # Ensure we have a valid connection
-        if connection_manager.is_connection_valid():
-            connection_reused = True
+        # Ensure we have a valid connection (this handles both validation and connection)
+        success, connection_reused = await connection_manager.ensure_connection()
+        if not success:
+            raise RuntimeError("Failed to establish connection to device")
+        
+        if connection_reused:
             logger.info("Using existing connection for operation")
         else:
-            logger.info("No valid connection, establishing new connection")
+            logger.info("Established new connection for operation")
             reconnect_attempts = 1
-            if not await connection_manager.ensure_connection():
-                raise RuntimeError("Failed to establish connection to device")
         
         # Get the connected device
         device = connection_manager.device
@@ -298,7 +335,8 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
                 connection_manager.is_connected = False
                 connection_manager.connection_time = None
                 
-                if await connection_manager.ensure_connection():
+                success, _ = await connection_manager.ensure_connection()
+                if success:
                     # Retry the operation
                     device = connection_manager.device
                     
@@ -450,11 +488,10 @@ async def get_device_status() -> StatusResponse:
     logger.info("Status endpoint called")
     
     try:
-        # Ensure we have a valid connection
-        if not connection_manager.is_connection_valid():
-            logger.info("No valid connection, establishing new connection for status check")
-            if not await connection_manager.ensure_connection():
-                raise RuntimeError("Failed to establish connection to device")
+        # Ensure we have a valid connection (this handles both validation and connection)
+        success, _ = await connection_manager.ensure_connection()
+        if not success:
+            raise RuntimeError("Failed to establish connection to device")
         
         # Get the connected device
         device = connection_manager.device
@@ -500,7 +537,8 @@ async def establish_connection() -> ConnectionResponse:
     logger.info("Connect endpoint called")
     
     try:
-        if await connection_manager.ensure_connection():
+        success, _ = await connection_manager.ensure_connection()
+        if success:
             device_info = connection_manager.get_device_info()
             
             result = {
@@ -557,12 +595,16 @@ async def get_connection_status() -> ConnectionResponse:
     try:
         device_info = connection_manager.get_device_info()
         
+        # Test if connection is actually working
+        connection_working = await connection_manager.test_connection()
+        
         result = {
             "success": True,
             "message": "Connection status retrieved successfully",
             "device_id": device_info.get("device_id"),
             "product_model": device_info.get("product_model"),
             "connection_established": device_info.get("is_connected", False),
+            "connection_working": connection_working,
             "connection_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(device_info.get("connection_time"))) if device_info.get("connection_time") else None
         }
         
@@ -571,6 +613,54 @@ async def get_connection_status() -> ConnectionResponse:
     except Exception as e:
         logger.error(f"Error getting connection status: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.get("/test-connection")
+async def test_connection() -> dict:
+    """
+    Test if the current connection is actually working.
+    """
+    logger.info("Test connection endpoint called")
+    
+    try:
+        if not connection_manager.device:
+            return {
+                "success": False,
+                "message": "No device instance available",
+                "connection_working": False
+            }
+        
+        if not connection_manager.is_connected:
+            return {
+                "success": False,
+                "message": "No active connection",
+                "connection_working": False
+            }
+        
+        # Test the connection
+        connection_working = await connection_manager.test_connection()
+        
+        if connection_working:
+            return {
+                "success": True,
+                "message": "Connection test successful",
+                "connection_working": True,
+                "device_status": str(connection_manager.device.getDeviceStatus())
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Connection test failed",
+                "connection_working": False
+            }
+        
+    except Exception as e:
+        logger.error(f"Error testing connection: {str(e)}")
+        return {
+            "success": False,
+            "message": f"Connection test error: {str(e)}",
+            "connection_working": False
+        }
 
 
 if __name__ == "__main__":
