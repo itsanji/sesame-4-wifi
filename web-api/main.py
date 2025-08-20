@@ -70,11 +70,11 @@ class StatusResponse(BaseModel):
 class ConnectionResponse(BaseModel):
     success: bool
     message: str
-    device_id: str = None
-    product_model: str = None
+    device_id: str | None = None
+    product_model: str | None = None
     connection_established: bool = False
     connection_working: bool = False
-    connection_time: str = None
+    connection_time: str | None = None
 
 
 # Global connection manager
@@ -224,6 +224,8 @@ class SesameConnectionManager:
                 finally:
                     self.is_connected = False
                     self.connection_time = None
+                    # Clear the device reference after disconnecting
+                    self.device = None
     
     def get_device_info(self) -> Dict[str, Any]:
         """Get current device information."""
@@ -567,14 +569,32 @@ async def disconnect_device() -> ConnectionResponse:
     logger.info("Disconnect endpoint called")
     
     try:
+        # Check if there's an active connection to disconnect
+        if not connection_manager.device or not connection_manager.is_connected:
+            result = {
+                "success": True,
+                "message": "No active connection to disconnect",
+                "device_id": None,
+                "product_model": None,
+                "connection_established": False,
+                "connection_working": False,
+                "connection_time": None
+            }
+            return ConnectionResponse(**result)
+        
+        # Get device info before disconnecting
+        device_info = connection_manager.get_device_info()
+        
+        # Disconnect the device
         await connection_manager.disconnect()
         
         result = {
             "success": True,
             "message": "Device disconnected successfully",
-            "device_id": None,
-            "product_model": None,
+            "device_id": device_info.get("device_id"),
+            "product_model": device_info.get("product_model"),
             "connection_established": False,
+            "connection_working": False,
             "connection_time": None
         }
         
