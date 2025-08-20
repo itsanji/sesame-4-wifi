@@ -1,1 +1,16 @@
+# python enviroment
 env
+venv
+
+sesame_typescript
+# env
+.env
+# python cache
+__pycache__/
+
+# lib
+pysesameos2
+
+# running file
+*.log
+*.pid
