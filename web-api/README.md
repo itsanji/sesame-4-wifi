@@ -1,14 +1,17 @@
-# SESAME Web API
+# SESAME Web API with Connection Pooling
 
-A FastAPI-based web server that provides REST endpoints to control SESAME smart locks via Bluetooth Low Energy (BLE).
+A FastAPI-based web server that provides REST endpoints to control SESAME smart locks via Bluetooth Low Energy (BLE) with persistent connections for improved performance.
 
 ## Features
 
--   **Toggle Endpoint**: `/toggle` - Toggle the lock state (lock/unlock)
+-   **Connection Pooling**: Persistent connections for faster operations
+-   **Auto Reconnection**: Automatic reconnection with configurable retry attempts
+-   **Toggle Endpoint**: `/toggle` - Toggle the lock state (lock/unlock) with connection reuse
 -   **Lock Control**: `/lock` - Lock the device
 -   **Unlock Control**: `/unlock` - Unlock the device
 -   **Bot Control**: `/click` - Click the SESAME Bot
 -   **Status Check**: `/status` - Get device status and battery info
+-   **Connection Management**: `/connect`, `/disconnect`, `/connection` - Manage persistent connections
 -   **Health Check**: `/health` - API health check
 
 ## Installation
@@ -35,16 +38,18 @@ A FastAPI-based web server that provides REST endpoints to control SESAME smart 
 
 Set the following environment variables:
 
-| Variable               | Description                  | Required              |
-| ---------------------- | ---------------------------- | --------------------- |
-| `SESAME_BLE_UUID`      | Your device's BLE UUID       | Yes                   |
-| `SESAME_SECRET_KEY`    | 16-byte secret key (hex)     | Yes                   |
-| `SESAME_PUBLIC_KEY`    | 64-byte public key (hex)     | Yes                   |
-| `SESAME_SCAN_DURATION` | BLE scan duration in seconds | No (default: 15)      |
-| `HOST`                 | Server host                  | No (default: 0.0.0.0) |
-| `PORT`                 | Server port                  | No (default: 8000)    |
-| `DEBUG`                | Enable debug mode            | No (default: false)   |
-| `LOG_LEVEL`            | Logging level                | No (default: INFO)    |
+| Variable                        | Description                   | Required              |
+| ------------------------------- | ----------------------------- | --------------------- |
+| `SESAME_BLE_UUID`               | Your device's BLE UUID        | Yes                   |
+| `SESAME_SECRET_KEY`             | 16-byte secret key (hex)      | Yes                   |
+| `SESAME_PUBLIC_KEY`             | 64-byte public key (hex)      | Yes                   |
+| `SESAME_SCAN_DURATION`          | BLE scan duration in seconds  | No (default: 15)      |
+| `SESAME_CONNECTION_TIMEOUT`     | Connection timeout in seconds | No (default: 1800)    |
+| `SESAME_MAX_RECONNECT_ATTEMPTS` | Maximum reconnection attempts | No (default: 5)       |
+| `HOST`                          | Server host                   | No (default: 0.0.0.0) |
+| `PORT`                          | Server port                   | No (default: 8000)    |
+| `DEBUG`                         | Enable debug mode             | No (default: false)   |
+| `LOG_LEVEL`                     | Logging level                 | No (default: INFO)    |
 
 ## Usage
 
@@ -86,6 +91,24 @@ curl -X POST http://localhost:8000/unlock
 curl http://localhost:8000/status
 ```
 
+#### Establish Connection (Pre-connect)
+
+```bash
+curl -X POST http://localhost:8000/connect
+```
+
+#### Get Connection Status
+
+```bash
+curl http://localhost:8000/connection
+```
+
+#### Disconnect
+
+```bash
+curl -X POST http://localhost:8000/disconnect
+```
+
 #### Health Check
 
 ```bash
@@ -107,7 +130,9 @@ curl http://localhost:8000/health
     "battery_voltage": 3.2,
     "is_in_lock_range": true,
     "is_in_unlock_range": true,
-    "position": 50
+    "position": 50,
+    "connection_reused": true,
+    "reconnect_attempts": 0
 }
 ```
 
@@ -118,6 +143,20 @@ curl http://localhost:8000/health
     "detail": "Error: Device not found during scan"
 }
 ```
+
+## Connection Pooling
+
+The API now uses connection pooling to maintain persistent connections to your SESAME device:
+
+-   **Persistent Connections**: Once connected, the connection is maintained for up to 30 minutes (configurable)
+-   **Fast Operations**: Subsequent operations reuse the existing connection, eliminating connection overhead
+-   **Auto Reconnection**: If the connection fails, the API automatically reconnects with up to 5 retry attempts
+-   **Connection Management**: Manual connection control via `/connect`, `/disconnect`, and `/connection` endpoints
+
+### Performance Benefits
+
+-   **First Request**: ~15-20 seconds (scan + connect + authenticate + operation)
+-   **Subsequent Requests**: ~1-3 seconds (operation only, connection reused)
 
 ## Supported Devices
 
