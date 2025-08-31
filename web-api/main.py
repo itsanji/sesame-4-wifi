@@ -25,8 +25,12 @@ from pysesameos2.chsesame2 import CHSesame2
 from pysesameos2.chsesamebot import CHSesameBot
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging with local time
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logging.getLogger("bleak").setLevel(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
@@ -85,18 +89,6 @@ class SesameConnectionManager:
         self.is_connected: bool = False
         self.connection_lock = asyncio.Lock()
     
-    def is_connection_valid(self) -> bool:
-        """Check if the current connection is still valid and within timeout."""
-        if not self.is_connected or not self.connection_time:
-            return False
-        
-        # Check if connection has expired
-        if time.time() - self.connection_time > CONNECTION_TIMEOUT:
-            logger.info("Connection has expired, will reconnect")
-            return False
-        
-        return True
-    
     async def test_connection(self) -> bool:
         """Test if the current connection is actually working by trying to get device status."""
         if not self.device or not self.is_connected:
@@ -109,6 +101,10 @@ class SesameConnectionManager:
             return True
         except Exception as e:
             logger.warning(f"Connection test failed: {str(e)}")
+            # Reset state when connection test fails
+            self.is_connected = False
+            self.connection_time = None
+            self.device = None  # Clear broken device instance
             return False
     
     async def is_connection_valid(self) -> bool:
@@ -119,6 +115,10 @@ class SesameConnectionManager:
         # Check if connection has expired
         if time.time() - self.connection_time > CONNECTION_TIMEOUT:
             logger.info("Connection has expired, will reconnect")
+            # Reset state when connection expires
+            self.is_connected = False
+            self.connection_time = None
+            self.device = None
             return False
         
         # Test if connection is actually working
@@ -178,7 +178,8 @@ class SesameConnectionManager:
                         logger.info("Using existing connection")
                         return True, True  # success, reused
                     
-                    # Get or create device
+                    # Always create a fresh device instance on reconnection
+                    self.device = None  # Force new device creation
                     device = await self.get_or_create_device()
                     
                     # Connect to device
@@ -202,6 +203,7 @@ class SesameConnectionManager:
                     # Reset connection state
                     self.is_connected = False
                     self.connection_time = None
+                    self.device = None  # Clear device instance on failure
                     
                     if attempts < max_attempts:
                         logger.info(f"Retrying in 2 seconds...")
@@ -336,6 +338,7 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
                 # Reset connection and try again
                 connection_manager.is_connected = False
                 connection_manager.connection_time = None
+                connection_manager.device = None  # Clear device instance for fresh reconnection
                 
                 success, _ = await connection_manager.ensure_connection()
                 if success:

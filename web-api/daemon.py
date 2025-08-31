@@ -18,10 +18,11 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-# Setup logging
+# Setup logging with local time
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
