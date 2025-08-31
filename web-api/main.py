@@ -40,7 +40,7 @@ SECRET_KEY = os.getenv("SESAME_SECRET_KEY", "")
 PUBLIC_KEY = os.getenv("SESAME_PUBLIC_KEY", "")
 SCAN_DURATION = int(os.getenv("SESAME_SCAN_DURATION", "15"))
 CONNECTION_TIMEOUT = int(os.getenv("SESAME_CONNECTION_TIMEOUT", "1800"))  # 30 minutes in seconds
-CRYPTO_SESSION_TIMEOUT = int(os.getenv("SESAME_CRYPTO_SESSION_TIMEOUT", "900"))  # 15 minutes in seconds (shorter than connection timeout)
+CRYPTO_SESSION_TIMEOUT = int(os.getenv("SESAME_CRYPTO_SESSION_TIMEOUT", "600"))  # 10 minutes in seconds (shorter than connection timeout)
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("SESAME_MAX_RECONNECT_ATTEMPTS", "5"))
 
 # FastAPI app
@@ -98,17 +98,26 @@ class SesameConnectionManager:
         
         self._cleanup_in_progress = True
         try:
-            if self.device and self.is_connected:
-                try:
-                    await self.device.disconnect()
-                    logger.debug("Device disconnected during cleanup")
-                except Exception as e:
-                    logger.debug(f"Error during cleanup disconnect (ignored): {e}")
-            
+            # First reset flags to prevent further operations
             self.is_connected = False
             self.connection_time = None
-            self.device = None
-            logger.debug("Connection state cleaned up")
+            
+            if self.device:
+                try:
+                    # Force disconnect with a timeout to prevent hanging
+                    await asyncio.wait_for(self.device.disconnect(), timeout=10.0)
+                    logger.debug("Device disconnected during cleanup")
+                except asyncio.TimeoutError:
+                    logger.warning("Device disconnect timed out during cleanup")
+                except Exception as e:
+                    logger.debug(f"Error during cleanup disconnect (ignored): {e}")
+                finally:
+                    # Always clear the device reference to force fresh creation
+                    self.device = None
+            
+            # Add a brief delay to allow BLE stack to reset
+            await asyncio.sleep(0.5)
+            logger.debug("Connection state cleaned up completely")
         finally:
             self._cleanup_in_progress = False
 
@@ -150,6 +159,8 @@ class SesameConnectionManager:
             logger.info("Crypto session has expired, will reconnect to prevent cryptographic errors")
             # Reset state when crypto session expires
             await self._cleanup_connection_state()
+            # Add extra delay after crypto session expiry to allow complete reset
+            await asyncio.sleep(2.0)
             return False
         
         # Test if connection is actually working
@@ -161,8 +172,8 @@ class SesameConnectionManager:
     
     async def get_or_create_device(self) -> Union[CHSesame2, CHSesameBot]:
         """Get existing device instance or create a new one."""
-        if not self.device:
-            self.device = await self._create_device_instance()
+        # Always create a fresh device instance to avoid stale crypto state
+        self.device = await self._create_device_instance()
         return self.device
     
     async def _create_device_instance(self) -> Union[CHSesame2, CHSesameBot]:
@@ -219,16 +230,21 @@ class SesameConnectionManager:
                     logger.info(f"Connecting to device (attempt {attempts + 1}/{max_attempts})...")
                     await device.connect()
                     
-                    # Wait for login to complete with timeout
+                    # Wait for login to complete with longer timeout
                     try:
-                        await asyncio.wait_for(device.wait_for_login(), timeout=30.0)
+                        logger.info("Waiting for device authentication...")
+                        await asyncio.wait_for(device.wait_for_login(), timeout=45.0)
+                        logger.info("Device authentication completed")
                     except asyncio.TimeoutError:
-                        raise RuntimeError("Login timeout - device authentication failed")
+                        raise RuntimeError("Login timeout - device authentication failed after 45 seconds")
+                    
+                    # Add a small delay to ensure crypto state is fully established
+                    await asyncio.sleep(1.0)
                     
                     # Verify connection is working before marking as connected
                     try:
                         device_status = device.getDeviceStatus()
-                        logger.debug(f"Connection verification successful, device status: {device_status}")
+                        logger.info(f"Connection verification successful, device status: {device_status}")
                     except Exception as verify_error:
                         raise RuntimeError(f"Connection verification failed: {verify_error}")
                     
@@ -241,15 +257,27 @@ class SesameConnectionManager:
                     
                 except Exception as e:
                     attempts += 1
-                    logger.error(f"Connection attempt {attempts} failed: {str(e)}")
+                    error_msg = str(e).lower()
+                    
+                    # Log different types of errors appropriately
+                    if "setcipher" in error_msg or "invalidtag" in error_msg:
+                        logger.error(f"Cryptographic error on connection attempt {attempts}: {str(e)}")
+                    elif "timeout" in error_msg:
+                        logger.error(f"Timeout on connection attempt {attempts}: {str(e)}")
+                    else:
+                        logger.error(f"Connection attempt {attempts} failed: {str(e)}")
                     
                     # Clean up on failure
                     await self._cleanup_connection_state()
                     
                     if attempts < max_attempts:
-                        # Exponential backoff for retry delay
-                        delay = min(2 ** attempts, 10)  # Cap at 10 seconds
-                        logger.info(f"Retrying in {delay} seconds...")
+                        # Longer delay for crypto errors to allow BLE stack to reset
+                        if "setcipher" in error_msg or "invalidtag" in error_msg:
+                            delay = min(5 + attempts, 15)  # 5-15 seconds for crypto errors
+                            logger.info(f"Cryptographic error detected, waiting {delay} seconds for BLE reset...")
+                        else:
+                            delay = min(2 ** attempts, 10)  # Exponential backoff for other errors
+                            logger.info(f"Retrying in {delay} seconds...")
                         await asyncio.sleep(delay)
                     else:
                         logger.error(f"Failed to connect after {max_attempts} attempts")
