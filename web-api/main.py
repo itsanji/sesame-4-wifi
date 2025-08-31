@@ -89,10 +89,32 @@ class SesameConnectionManager:
         self.connection_time: Optional[float] = None
         self.is_connected: bool = False
         self.connection_lock = asyncio.Lock()
+        self._cleanup_in_progress = False
     
+    async def _cleanup_connection_state(self):
+        """Clean up connection state completely."""
+        if self._cleanup_in_progress:
+            return
+        
+        self._cleanup_in_progress = True
+        try:
+            if self.device and self.is_connected:
+                try:
+                    await self.device.disconnect()
+                    logger.debug("Device disconnected during cleanup")
+                except Exception as e:
+                    logger.debug(f"Error during cleanup disconnect (ignored): {e}")
+            
+            self.is_connected = False
+            self.connection_time = None
+            self.device = None
+            logger.debug("Connection state cleaned up")
+        finally:
+            self._cleanup_in_progress = False
+
     async def test_connection(self) -> bool:
         """Test if the current connection is actually working by trying to get device status."""
-        if not self.device or not self.is_connected:
+        if not self.device or not self.is_connected or self._cleanup_in_progress:
             return False
         
         try:
@@ -101,34 +123,33 @@ class SesameConnectionManager:
             logger.debug(f"Connection test successful, device status: {device_status}")
             return True
         except Exception as e:
-            # Check if it's a cryptographic error (InvalidTag, setCipher, etc.)
-            if "InvalidTag" in str(e) or "setCipher" in str(e) or "cryptography" in str(e).lower():
+            error_msg = str(e).lower()
+            # Check for various disconnection/error scenarios
+            is_crypto_error = any(term in error_msg for term in ["invalidtag", "setcipher", "cryptography"])
+            is_connection_error = any(term in error_msg for term in ["connection", "disconnect", "timeout", "unreachable"])
+            is_ble_error = any(term in error_msg for term in ["ble", "bluetooth", "gatt"])
+            
+            if is_crypto_error:
                 logger.warning(f"Cryptographic error during connection test - session expired: {str(e)}")
-                # Reset state for cryptographic errors as they indicate session expiration
-                self.is_connected = False
-                self.connection_time = None
-                self.device = None  # Clear broken device instance
-                return False
+            elif is_connection_error or is_ble_error:
+                logger.warning(f"Connection/BLE error during connection test: {str(e)}")
             else:
                 logger.warning(f"Connection test failed: {str(e)}")
-                # Reset state when connection test fails
-                self.is_connected = False
-                self.connection_time = None
-                self.device = None  # Clear broken device instance
-                return False
+            
+            # Always clean up on any error
+            await self._cleanup_connection_state()
+            return False
     
     async def is_connection_valid(self) -> bool:
         """Check if the current connection is still valid and actually working."""
-        if not self.is_connected or not self.connection_time:
+        if not self.is_connected or not self.connection_time or self._cleanup_in_progress:
             return False
         
         # Check if crypto session has expired (shorter timeout to prevent cryptographic errors)
         if time.time() - self.connection_time > CRYPTO_SESSION_TIMEOUT:
             logger.info("Crypto session has expired, will reconnect to prevent cryptographic errors")
             # Reset state when crypto session expires
-            self.is_connected = False
-            self.connection_time = None
-            self.device = None
+            await self._cleanup_connection_state()
             return False
         
         # Test if connection is actually working
@@ -188,16 +209,28 @@ class SesameConnectionManager:
                         logger.info("Using existing connection")
                         return True, True  # success, reused
                     
-                    # Always create a fresh device instance on reconnection
-                    self.device = None  # Force new device creation
+                    # Always clean up completely before reconnection
+                    await self._cleanup_connection_state()
+                    
+                    # Force fresh device instance creation
                     device = await self.get_or_create_device()
                     
                     # Connect to device
                     logger.info(f"Connecting to device (attempt {attempts + 1}/{max_attempts})...")
                     await device.connect()
                     
-                    # Wait for login to complete
-                    await device.wait_for_login()
+                    # Wait for login to complete with timeout
+                    try:
+                        await asyncio.wait_for(device.wait_for_login(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        raise RuntimeError("Login timeout - device authentication failed")
+                    
+                    # Verify connection is working before marking as connected
+                    try:
+                        device_status = device.getDeviceStatus()
+                        logger.debug(f"Connection verification successful, device status: {device_status}")
+                    except Exception as verify_error:
+                        raise RuntimeError(f"Connection verification failed: {verify_error}")
                     
                     # Update connection state
                     self.is_connected = True
@@ -210,14 +243,14 @@ class SesameConnectionManager:
                     attempts += 1
                     logger.error(f"Connection attempt {attempts} failed: {str(e)}")
                     
-                    # Reset connection state
-                    self.is_connected = False
-                    self.connection_time = None
-                    self.device = None  # Clear device instance on failure
+                    # Clean up on failure
+                    await self._cleanup_connection_state()
                     
                     if attempts < max_attempts:
-                        logger.info(f"Retrying in 2 seconds...")
-                        await asyncio.sleep(2)
+                        # Exponential backoff for retry delay
+                        delay = min(2 ** attempts, 10)  # Cap at 10 seconds
+                        logger.info(f"Retrying in {delay} seconds...")
+                        await asyncio.sleep(delay)
                     else:
                         logger.error(f"Failed to connect after {max_attempts} attempts")
                         return False, False  # failed, not reused
@@ -227,17 +260,8 @@ class SesameConnectionManager:
     async def disconnect(self):
         """Disconnect the current device."""
         async with self.connection_lock:
-            if self.device and self.is_connected:
-                try:
-                    await self.device.disconnect()
-                    logger.info("Device disconnected")
-                except Exception as e:
-                    logger.error(f"Error disconnecting device: {str(e)}")
-                finally:
-                    self.is_connected = False
-                    self.connection_time = None
-                    # Clear the device reference after disconnecting
-                    self.device = None
+            await self._cleanup_connection_state()
+            logger.info("Device disconnected and cleaned up")
     
     def get_device_info(self) -> Dict[str, Any]:
         """Get current device information."""
@@ -341,21 +365,27 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
     except Exception as e:
         logger.error(f"Error performing operation '{operation}': {str(e)}")
         
-        # Check if it's a cryptographic error that requires reconnection
-        is_cryptographic_error = "InvalidTag" in str(e) or "setCipher" in str(e) or "cryptography" in str(e).lower()
+        # Enhanced error detection for different failure scenarios
+        error_msg = str(e).lower()
+        is_crypto_error = any(term in error_msg for term in ["invalidtag", "setcipher", "cryptography"])
+        is_connection_error = any(term in error_msg for term in ["connection", "disconnect", "timeout", "unreachable"])
+        is_ble_error = any(term in error_msg for term in ["ble", "bluetooth", "gatt"])
         
-        # Retry on cryptographic errors or if connection wasn't reused
-        if (is_cryptographic_error or not connection_reused) and reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
-            if is_cryptographic_error:
+        # Retry on various error types or if connection wasn't reused
+        should_retry = ((is_crypto_error or is_connection_error or is_ble_error or not connection_reused) 
+                       and reconnect_attempts < MAX_RECONNECT_ATTEMPTS)
+        
+        if should_retry:
+            if is_crypto_error:
                 logger.info(f"Cryptographic error detected, forcing reconnection and retry...")
+            elif is_connection_error or is_ble_error:
+                logger.info(f"Connection/BLE error detected, forcing reconnection and retry...")
             else:
                 logger.info("Operation failed, attempting to reconnect and retry...")
             
             try:
-                # Reset connection and try again
-                connection_manager.is_connected = False
-                connection_manager.connection_time = None
-                connection_manager.device = None  # Clear device instance for fresh reconnection
+                # Clean up and reset connection completely
+                await connection_manager._cleanup_connection_state()
                 
                 success, _ = await connection_manager.ensure_connection()
                 if success:
@@ -402,12 +432,9 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
                     
             except Exception as retry_error:
                 logger.error(f"Retry attempt also failed: {str(retry_error)}")
-                # If retry also fails with cryptographic error, clear the device completely
-                if "InvalidTag" in str(retry_error) or "setCipher" in str(retry_error) or "cryptography" in str(retry_error).lower():
-                    logger.error("Cryptographic error in retry - clearing device completely")
-                    connection_manager.is_connected = False
-                    connection_manager.connection_time = None
-                    connection_manager.device = None
+                # Always clean up completely on retry failure
+                await connection_manager._cleanup_connection_state()
+                logger.error("Retry failed - connection completely reset for next attempt")
         
         return {
             "success": False,
