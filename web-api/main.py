@@ -40,6 +40,7 @@ SECRET_KEY = os.getenv("SESAME_SECRET_KEY", "")
 PUBLIC_KEY = os.getenv("SESAME_PUBLIC_KEY", "")
 SCAN_DURATION = int(os.getenv("SESAME_SCAN_DURATION", "15"))
 CONNECTION_TIMEOUT = int(os.getenv("SESAME_CONNECTION_TIMEOUT", "1800"))  # 30 minutes in seconds
+CRYPTO_SESSION_TIMEOUT = int(os.getenv("SESAME_CRYPTO_SESSION_TIMEOUT", "900"))  # 15 minutes in seconds (shorter than connection timeout)
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("SESAME_MAX_RECONNECT_ATTEMPTS", "5"))
 
 # FastAPI app
@@ -100,22 +101,31 @@ class SesameConnectionManager:
             logger.debug(f"Connection test successful, device status: {device_status}")
             return True
         except Exception as e:
-            logger.warning(f"Connection test failed: {str(e)}")
-            # Reset state when connection test fails
-            self.is_connected = False
-            self.connection_time = None
-            self.device = None  # Clear broken device instance
-            return False
+            # Check if it's a cryptographic error (InvalidTag, setCipher, etc.)
+            if "InvalidTag" in str(e) or "setCipher" in str(e) or "cryptography" in str(e).lower():
+                logger.warning(f"Cryptographic error during connection test - session expired: {str(e)}")
+                # Reset state for cryptographic errors as they indicate session expiration
+                self.is_connected = False
+                self.connection_time = None
+                self.device = None  # Clear broken device instance
+                return False
+            else:
+                logger.warning(f"Connection test failed: {str(e)}")
+                # Reset state when connection test fails
+                self.is_connected = False
+                self.connection_time = None
+                self.device = None  # Clear broken device instance
+                return False
     
     async def is_connection_valid(self) -> bool:
         """Check if the current connection is still valid and actually working."""
         if not self.is_connected or not self.connection_time:
             return False
         
-        # Check if connection has expired
-        if time.time() - self.connection_time > CONNECTION_TIMEOUT:
-            logger.info("Connection has expired, will reconnect")
-            # Reset state when connection expires
+        # Check if crypto session has expired (shorter timeout to prevent cryptographic errors)
+        if time.time() - self.connection_time > CRYPTO_SESSION_TIMEOUT:
+            logger.info("Crypto session has expired, will reconnect to prevent cryptographic errors")
+            # Reset state when crypto session expires
             self.is_connected = False
             self.connection_time = None
             self.device = None
@@ -331,9 +341,16 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
     except Exception as e:
         logger.error(f"Error performing operation '{operation}': {str(e)}")
         
-        # If operation failed, try to reconnect and retry once
-        if not connection_reused and reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
-            logger.info("Operation failed, attempting to reconnect and retry...")
+        # Check if it's a cryptographic error that requires reconnection
+        is_cryptographic_error = "InvalidTag" in str(e) or "setCipher" in str(e) or "cryptography" in str(e).lower()
+        
+        # Retry on cryptographic errors or if connection wasn't reused
+        if (is_cryptographic_error or not connection_reused) and reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+            if is_cryptographic_error:
+                logger.info(f"Cryptographic error detected, forcing reconnection and retry...")
+            else:
+                logger.info("Operation failed, attempting to reconnect and retry...")
+            
             try:
                 # Reset connection and try again
                 connection_manager.is_connected = False
@@ -385,6 +402,12 @@ async def perform_device_operation(operation: str, history_tag: str = "Web API")
                     
             except Exception as retry_error:
                 logger.error(f"Retry attempt also failed: {str(retry_error)}")
+                # If retry also fails with cryptographic error, clear the device completely
+                if "InvalidTag" in str(retry_error) or "setCipher" in str(retry_error) or "cryptography" in str(retry_error).lower():
+                    logger.error("Cryptographic error in retry - clearing device completely")
+                    connection_manager.is_connected = False
+                    connection_manager.connection_time = None
+                    connection_manager.device = None
         
         return {
             "success": False,
@@ -418,6 +441,7 @@ async def root():
         },
         "configuration": {
             "connection_timeout": f"{CONNECTION_TIMEOUT} seconds ({CONNECTION_TIMEOUT/60:.1f} minutes)",
+            "crypto_session_timeout": f"{CRYPTO_SESSION_TIMEOUT} seconds ({CRYPTO_SESSION_TIMEOUT/60:.1f} minutes)",
             "max_reconnect_attempts": MAX_RECONNECT_ATTEMPTS,
             "scan_duration": f"{SCAN_DURATION} seconds"
         }
@@ -705,6 +729,7 @@ if __name__ == "__main__":
     print(f"Device BLE UUID: {BLE_UUID}")
     print(f"Scan Duration: {SCAN_DURATION} seconds")
     print(f"Connection Timeout: {CONNECTION_TIMEOUT} seconds ({CONNECTION_TIMEOUT/60:.1f} minutes)")
+    print(f"Crypto Session Timeout: {CRYPTO_SESSION_TIMEOUT} seconds ({CRYPTO_SESSION_TIMEOUT/60:.1f} minutes)")
     print(f"Max Reconnect Attempts: {MAX_RECONNECT_ATTEMPTS}")
     print("Server will be available at: http://localhost:8000")
     print("API documentation at: http://localhost:8000/docs")
